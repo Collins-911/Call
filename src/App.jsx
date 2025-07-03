@@ -4,7 +4,7 @@ import VideoPlayer from './components/VideoPlayer'
 import Controls from './components/Controls'
 import './styles.css'
 
-const socket = io('http://localhost:4000')
+const socket = io('https://your-signaling-server.onrender.com');
 
 function App() {
   const [roomId, setRoomId] = useState('')
