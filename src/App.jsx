@@ -1,222 +1,174 @@
-import { useState, useEffect, useRef } from 'react'
-import io from 'socket.io-client'
-import VideoPlayer from './components/VideoPlayer'
-import Controls from './components/Controls'
-import './styles.css'
+import React, { useEffect, useRef, useState } from 'react';
+import { Peer } from 'peerjs';
 
-const socket = io('https://your-signaling-server.onrender.com');
+export default function App() {
+  const [peerId, setPeerId] = useState('');
+  const [remotePeerId, setRemotePeerId] = useState('');
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
 
-function App() {
-  const [roomId, setRoomId] = useState('')
-  const [localStream, setLocalStream] = useState(null)
-  const [remoteStream, setRemoteStream] = useState(null)
-  const [isCallActive, setIsCallActive] = useState(false)
-  const [isMuted, setIsMuted] = useState(false)
-  const [isVideoOff, setIsVideoOff] = useState(false)
-  const peerConnection = useRef(null)
-  const localVideoRef = useRef(null)
-  const remoteVideoRef = useRef(null)
-
-  const servers = {
-    iceServers: [
-      {
-        urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302']
-      }
-    ]
-  }
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const peer = useRef(null);
 
   useEffect(() => {
-    // Set up socket listeners
-    socket.on('roomCreated', (room) => {
-      console.log('Room created:', room)
-      setRoomId(room)
-    })
+    peer.current = new Peer(undefined, {
+      host: 'peerjs.com',
+      port: 443,
+      secure: true,
+      path: '/',
+      debug: 3
+    });
 
-    socket.on('roomJoined', (room) => {
-      console.log('Joined room:', room)
-      setRoomId(room)
-      createOffer()
-    })
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        setLocalStream(stream);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+      })
+      .catch(error => {
+        console.error('Error accessing media devices:', error);
+        alert('Could not access camera/microphone. Please check permissions.');
+      });
 
-    socket.on('offer', async (offer) => {
-      if (!isCallActive) {
-        await createAnswer(offer)
-      }
-    })
+    peer.current.on('open', (id) => {
+      setPeerId(id);
+    });
 
-    socket.on('answer', async (answer) => {
-      await peerConnection.current.setRemoteDescription(answer)
-    })
+    peer.current.on('call', (call) => {
+      setConnectionStatus('Incoming call...');
+      call.answer(localStream);
+      call.on('stream', (stream) => {
+        setRemoteStream(stream);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = stream;
+        }
+        setConnectionStatus('Connected');
+      });
+      call.on('error', (error) => {
+        console.error('Call error:', error);
+        setConnectionStatus('Call failed');
+      });
+      call.on('close', () => {
+        setConnectionStatus('Call ended');
+        setRemoteStream(null);
+      });
+    });
 
-    socket.on('ice-candidate', async (candidate) => {
-      try {
-        await peerConnection.current.addIceCandidate(candidate)
-      } catch (error) {
-        console.error('Error adding ICE candidate:', error)
-      }
-    })
+    peer.current.on('error', (error) => {
+      console.error('PeerJS error:', error);
+      setConnectionStatus('Error: ' + error.message);
+    });
 
     return () => {
-      socket.off('roomCreated')
-      socket.off('roomJoined')
-      socket.off('offer')
-      socket.off('answer')
-      socket.off('ice-candidate')
+      if (peer.current) {
+        peer.current.destroy();
+      }
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  const callPeer = () => {
+    if (!remotePeerId.trim()) {
+      alert('Please enter a remote peer ID');
+      return;
     }
-  }, [isCallActive])
 
-  const setupPeerConnection = () => {
-    peerConnection.current = new RTCPeerConnection(servers)
+    if (!localStream) {
+      alert('Local stream not ready yet');
+      return;
+    }
 
-    // Add local stream to peer connection
-    localStream.getTracks().forEach(track => {
-      peerConnection.current.addTrack(track, localStream)
-    })
+    setConnectionStatus('Calling...');
+    const call = peer.current.call(remotePeerId, localStream);
 
-    // Set up event handlers for peer connection
-    peerConnection.current.ontrack = (event) => {
+    call.on('stream', (stream) => {
+      setRemoteStream(stream);
       if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0]
-        setRemoteStream(event.streams[0])
+        remoteVideoRef.current.srcObject = stream;
       }
-    }
+      setConnectionStatus('Connected');
+    });
 
-    peerConnection.current.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('ice-candidate', { candidate: event.candidate, roomId })
-      }
-    }
+    call.on('error', (error) => {
+      console.error('Call error:', error);
+      setConnectionStatus('Call failed');
+    });
 
-    peerConnection.current.oniceconnectionstatechange = () => {
-      if (peerConnection.current.iceConnectionState === 'disconnected') {
-        handleHangUp()
-      }
-    }
-  }
+    call.on('close', () => {
+      setConnectionStatus('Call ended');
+      setRemoteStream(null);
+    });
+  };
 
-  const createRoom = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      setLocalStream(stream)
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream
-      }
-      socket.emit('createRoom')
-      setupPeerConnection()
-      setIsCallActive(true)
-    } catch (error) {
-      console.error('Error accessing media devices:', error)
-    }
-  }
-
-  const joinRoom = async () => {
-    if (!roomId) return
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      setLocalStream(stream)
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream
-      }
-      socket.emit('joinRoom', roomId)
-      setupPeerConnection()
-      setIsCallActive(true)
-    } catch (error) {
-      console.error('Error accessing media devices:', error)
-    }
-  }
-
-  const createOffer = async () => {
-    try {
-      const offer = await peerConnection.current.createOffer()
-      await peerConnection.current.setLocalDescription(offer)
-      socket.emit('offer', { offer, roomId })
-    } catch (error) {
-      console.error('Error creating offer:', error)
-    }
-  }
-
-  const createAnswer = async (offer) => {
-    try {
-      await peerConnection.current.setRemoteDescription(offer)
-      const answer = await peerConnection.current.createAnswer()
-      await peerConnection.current.setLocalDescription(answer)
-      socket.emit('answer', { answer, roomId })
-    } catch (error) {
-      console.error('Error creating answer:', error)
-    }
-  }
-
-  const handleHangUp = () => {
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop())
-    }
+  const endCall = () => {
     if (remoteStream) {
-      remoteStream.getTracks().forEach(track => track.stop())
+      remoteStream.getTracks().forEach(track => track.stop());
+      setRemoteStream(null);
     }
-    if (peerConnection.current) {
-      peerConnection.current.close()
-    }
-    setLocalStream(null)
-    setRemoteStream(null)
-    setIsCallActive(false)
-    setRoomId('')
-    socket.emit('leaveRoom', roomId)
-  }
-
-  const toggleMute = () => {
-    if (localStream) {
-      localStream.getAudioTracks().forEach(track => {
-        track.enabled = !track.enabled
-      })
-      setIsMuted(!isMuted)
-    }
-  }
-
-  const toggleVideo = () => {
-    if (localStream) {
-      localStream.getVideoTracks().forEach(track => {
-        track.enabled = !track.enabled
-      })
-      setIsVideoOff(!isVideoOff)
-    }
-  }
+    setConnectionStatus('Disconnected');
+  };
 
   return (
-    <div className="app">
-      <h1>Video Chat App</h1>
-      
-      {!isCallActive ? (
-        <div className="setup">
-          <button onClick={createRoom}>Create Room</button>
-          <div className="join-room">
-            <input
-              type="text"
-              placeholder="Enter Room ID"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
-            />
-            <button onClick={joinRoom}>Join Room</button>
-          </div>
-        </div>
-      ) : (
-        <div className="call-container">
-          <div className="video-container">
-            <VideoPlayer stream={localStream} isLocal={true} ref={localVideoRef} />
-            <VideoPlayer stream={remoteStream} isLocal={false} ref={remoteVideoRef} />
-          </div>
-          <Controls
-            isMuted={isMuted}
-            isVideoOff={isVideoOff}
-            onHangUp={handleHangUp}
-            onToggleMute={toggleMute}
-            onToggleVideo={toggleVideo}
-          />
-          <div className="room-id">Room ID: {roomId}</div>
-        </div>
-      )}
-    </div>
-  )
-}
+    <div style={{ textAlign: 'center', padding: '20px', backgroundColor: '#0f172a', color: '#fff', minHeight: '100vh' }}>
+      <h2>🎥 PeerJS Video Call</h2>
+      <p>Your Peer ID: <strong>{peerId}</strong></p>
+      <p>Status: <strong>{connectionStatus}</strong></p>
 
-export default App
+      <div style={{ margin: '20px 0' }}>
+        <input
+          type="text"
+          value={remotePeerId}
+          onChange={(e) => setRemotePeerId(e.target.value)}
+          placeholder="Enter remote peer ID"
+          style={{ padding: '10px', width: '240px', borderRadius: '8px', marginRight: '10px', border: 'none' }}
+        />
+        <button onClick={callPeer} style={{ padding: '10px 20px', marginRight: '10px', backgroundColor: '#38bdf8', color: '#000', borderRadius: '8px', cursor: 'pointer' }}>
+          Call
+        </button>
+        <button onClick={endCall} style={{ padding: '10px 20px', backgroundColor: '#ef4444', color: '#fff', borderRadius: '8px', cursor: 'pointer' }}>
+          End Call
+        </button>
+      </div>
+
+      <div style={{ marginTop: '30px', display: 'flex', justifyContent: 'center', gap: '40px', flexWrap: 'wrap' }}>
+        <div>
+          <h4>Local Video</h4>
+          <video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{
+              width: '320px',
+              height: '240px',
+              backgroundColor: '#1e293b',
+              borderRadius: '10px',
+              border: '2px solid #334155'
+            }}
+          />
+        </div>
+
+        <div>
+          <h4>Remote Video</h4>
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            style={{
+              width: '320px',
+              height: '240px',
+              backgroundColor: '#1e293b',
+              borderRadius: '10px',
+              border: '2px solid #334155'
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
